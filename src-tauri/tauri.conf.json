@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ThinkCharge",
+  "version": "0.1.0",
+  "identifier": "com.thinkcharge.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "widget",
+        "title": "ThinkCharge",
+        "width": 260,
+        "height": 208,
+        "minWidth": 210,
+        "minHeight": 168,
+        "maxWidth": 435,
+        "maxHeight": 347,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": true,
+        "resizable": true,
+        "visible": true
+      },
+      {
+        "label": "settings",
+        "title": "ThinkCharge Settings",
+        "width": 460,
+        "height": 640,
+        "visible": false,
+        "center": true,
+        "resizable": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
