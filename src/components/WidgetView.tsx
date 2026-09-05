@@ -12,6 +12,7 @@ import {
 } from "../api";
 import { useSystemTheme } from "../hooks/useSystemTheme";
 import { ChargeBar } from "./ChargeBar";
+import { WidgetStatus } from "./WidgetStatus";
 import type { AppConfig, BatteryStatus } from "../types";
 
 function modeLabel(config: AppConfig | null): string {
@@ -54,21 +55,8 @@ function chargeSessionActive(config: AppConfig | null): boolean {
   );
 }
 
-function buildStatusParts(
-  status: BatteryStatus,
-  config: AppConfig,
-): string[] {
-  const parts: string[] = [];
-  if (config.showBatteryPercent) {
-    parts.push(`${status.percent}%`);
-  }
-  if (config.showPowerSource) {
-    parts.push(status.isPlugged ? "AC power" : "On battery");
-  }
-  if (config.showChargingStatus) {
-    parts.push(status.isCharging ? "Charging" : "Not charging");
-  }
-  return parts;
+function clampScale(scale: number): number {
+  return Math.min(1.75, Math.max(0.85, Number(scale.toFixed(2))));
 }
 
 function GearIcon() {
@@ -91,11 +79,16 @@ function GearIcon() {
 export function WidgetView() {
   const [status, setStatus] = useState<BatteryStatus | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [previewScale, setPreviewScale] = useState<number | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const resizeRef = useRef<{ startY: number; startScale: number } | null>(null);
+  const draggingRef = useRef(false);
+  const rafRef = useRef<number | null>(null);
+  const pendingScaleRef = useRef<number | null>(null);
+  const lastWindowSyncRef = useRef(0);
   const window = getCurrentWindow();
 
-  useSystemTheme(config?.matchOsTheme ?? true);
+  useSystemTheme(config?.matchOsTheme ?? true, false);
 
   const refresh = useCallback(async () => {
     const [battery, cfg] = await Promise.all([getBatteryStatus(), getAppConfig()]);
@@ -126,27 +119,37 @@ export function WidgetView() {
     };
   }, [refresh]);
 
+  // Sync scale when the user resizes via window edges (not the drag handle).
   useEffect(() => {
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
 
     const onResize = () => {
+      if (draggingRef.current) return;
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         void window.innerSize().then(async (size) => {
-          const scale = scaleFromWindowSize(size.width, size.height);
-          const clamped = Math.min(1.75, Math.max(0.85, Number(scale.toFixed(2))));
-          if (config && Math.abs(clamped - config.widgetScale) < 0.02) return;
-          await setWidgetScale(clamped);
-          void refresh();
+          if (draggingRef.current) return;
+          const next = clampScale(
+            scaleFromWindowSize(size.width, size.height, showChargeBar(config)),
+          );
+          setPreviewScale(null);
+          setConfig((prev) => (prev ? { ...prev, widgetScale: next } : prev));
+          await setWidgetScale(next, true);
         });
-      }, 120);
+      }, 200);
     };
 
     void window.onResized(onResize);
     return () => {
       if (resizeTimer) clearTimeout(resizeTimer);
     };
-  }, [config, refresh, window]);
+  }, [window]);
+
+  const commitScale = useCallback(async (scale: number, persist: boolean) => {
+    const next = clampScale(scale);
+    await setWidgetScale(next, persist);
+    setConfig((prev) => (prev ? { ...prev, widgetScale: next } : prev));
+  }, []);
 
   const onDragEnd = async () => {
     const pos = await window.outerPosition();
@@ -163,19 +166,43 @@ export function WidgetView() {
     event.preventDefault();
     event.stopPropagation();
     if (!config) return;
+    draggingRef.current = true;
     resizeRef.current = { startY: event.clientY, startScale: config.widgetScale };
   };
 
   useEffect(() => {
+    const schedulePreview = (scale: number) => {
+      pendingScaleRef.current = scale;
+      if (rafRef.current !== null) return;
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = null;
+        if (pendingScaleRef.current !== null) {
+          setPreviewScale(pendingScaleRef.current);
+        }
+      });
+    };
+
     const onMove = (event: MouseEvent) => {
-      if (!resizeRef.current || !config) return;
+      if (!resizeRef.current) return;
       const delta = event.clientY - resizeRef.current.startY;
-      const next = Math.min(1.75, Math.max(0.85, resizeRef.current.startScale + delta / 180));
-      void setWidgetScale(next).then(refresh);
+      const next = clampScale(resizeRef.current.startScale + delta / 180);
+      schedulePreview(next);
+
+      const now = performance.now();
+      if (now - lastWindowSyncRef.current > 80) {
+        lastWindowSyncRef.current = now;
+        void setWidgetScale(next, false);
+      }
     };
 
     const onUp = () => {
+      if (!resizeRef.current) return;
+      const finalScale = pendingScaleRef.current ?? previewScale ?? config?.widgetScale ?? 1.05;
       resizeRef.current = null;
+      draggingRef.current = false;
+      pendingScaleRef.current = null;
+      setPreviewScale(null);
+      void commitScale(finalScale, true);
     };
 
     globalThis.addEventListener("mousemove", onMove);
@@ -183,12 +210,13 @@ export function WidgetView() {
     return () => {
       globalThis.removeEventListener("mousemove", onMove);
       globalThis.removeEventListener("mouseup", onUp);
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+      }
     };
-  }, [config, refresh]);
+  }, [commitScale, config?.widgetScale, previewScale]);
 
-  const scale = config?.widgetScale ?? 1.05;
-  const statusParts = status && config ? buildStatusParts(status, config) : [];
-  const statusText = statusParts.length > 0 ? statusParts.join(" · ") : "…";
+  const scale = previewScale ?? config?.widgetScale ?? 1.05;
 
   return (
     <div
@@ -220,7 +248,11 @@ export function WidgetView() {
           </div>
         </div>
 
-        <p className="widget-status">{statusText}</p>
+        {status && config ? (
+          <WidgetStatus status={status} config={config} />
+        ) : (
+          <p className="widget-status-row">…</p>
+        )}
         <p className="widget-mode">{modeLabel(config)}</p>
 
         <ChargeBar

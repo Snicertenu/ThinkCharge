@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Effect, getCurrentWindow } from "@tauri-apps/api/window";
 import type { SystemTheme } from "../types";
 
-export function useSystemTheme(enabled: boolean) {
+export function useSystemTheme(enabled: boolean, applyWindowEffects = true) {
   const [theme, setTheme] = useState<SystemTheme>("dark");
 
   useEffect(() => {
@@ -20,7 +20,7 @@ export function useSystemTheme(enabled: boolean) {
         setTheme(resolved);
         document.documentElement.dataset.theme = resolved;
 
-        if (import.meta.env.TAURI_ENV_PLATFORM === "windows") {
+        if (import.meta.env.TAURI_ENV_PLATFORM === "windows" && applyWindowEffects) {
           const effectOptions =
             resolved === "dark" ? [Effect.Mica, Effect.Acrylic] : [Effect.Mica, Effect.Acrylic];
           for (const effect of effectOptions) {
@@ -60,7 +60,7 @@ export function useSystemTheme(enabled: boolean) {
       media.removeEventListener("change", onMediaChange);
       unlisten?.();
     };
-  }, [enabled]);
+  }, [enabled, applyWindowEffects]);
 
   return theme;
 }

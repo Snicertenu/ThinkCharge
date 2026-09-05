@@ -33,6 +33,13 @@ body,
   overflow: hidden;
 }
 
+html[data-window="settings"],
+html[data-window="settings"] body,
+html[data-window="settings"] #root {
+  background: #0f1115;
+  overflow: auto;
+}
+
 body {
   font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -43,6 +50,8 @@ body {
   position: relative;
   width: 100%;
   height: 100%;
+  --widget-radius: calc(16px * var(--widget-scale, 1));
+  border-radius: var(--widget-radius);
   overflow: hidden;
 }
 
@@ -50,21 +59,25 @@ body {
   position: absolute;
   inset: 0;
   box-sizing: border-box;
-  padding: calc(12px * var(--widget-scale, 1));
-  border-radius: calc(16px * var(--widget-scale, 1));
+  display: flex;
+  flex-direction: column;
+  padding: calc(10px * var(--widget-scale, 1)) calc(12px * var(--widget-scale, 1))
+    calc(8px * var(--widget-scale, 1));
+  border-radius: var(--widget-radius);
   border: 1px solid var(--widget-border);
   background: var(--widget-bg);
   color: var(--widget-text);
   box-shadow: var(--widget-shadow);
   backdrop-filter: blur(24px) saturate(1.4);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  overflow: hidden;
 }
 
 .widget-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 8px;
+  margin-bottom: calc(6px * var(--widget-scale, 1));
   cursor: grab;
 }
 
@@ -102,6 +115,45 @@ body {
   color: var(--widget-text);
 }
 
+.widget-status-row {
+  display: flex;
+  align-items: center;
+  gap: calc(10px * var(--widget-scale, 1));
+  margin: 0;
+  min-height: calc(24px * var(--widget-scale, 1));
+}
+
+.widget-status__percent {
+  font-size: calc(22px * var(--widget-scale, 1));
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.widget-status__indicators {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6px * var(--widget-scale, 1));
+  color: var(--widget-muted);
+}
+
+.widget-status__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.status-icon {
+  width: calc(18px * var(--widget-scale, 1));
+  height: calc(18px * var(--widget-scale, 1));
+}
+
+.widget-status__text {
+  font-size: calc(12px * var(--widget-scale, 1));
+  font-weight: 600;
+  color: var(--widget-muted);
+}
+
 .widget-status {
   margin: 0;
   font-size: calc(18px * var(--widget-scale, 1));
@@ -110,7 +162,7 @@ body {
 }
 
 .widget-mode {
-  margin: calc(4px * var(--widget-scale, 1)) 0 calc(8px * var(--widget-scale, 1));
+  margin: calc(3px * var(--widget-scale, 1)) 0 calc(6px * var(--widget-scale, 1));
   font-size: calc(11px * var(--widget-scale, 1));
   color: var(--widget-muted);
 }
@@ -471,4 +523,138 @@ body {
 .settings-secondary {
   background: rgba(255, 255, 255, 0.06);
   color: #e5e7eb;
+}
+
+/* ── Battery report dialog ── */
+.report-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.report-dialog {
+  width: min(100%, 480px);
+  max-height: min(90vh, 640px);
+  overflow-y: auto;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #1a1d24;
+  color: #e5e7eb;
+  padding: 18px 20px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+}
+
+.report-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.report-dialog-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.report-dialog-close {
+  border: 0;
+  background: transparent;
+  color: #9ca3af;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.report-dialog-meta {
+  margin: 6px 0 14px;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.report-health {
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.report-health--good {
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.report-health--fair {
+  background: rgba(234, 179, 8, 0.12);
+  border-color: rgba(234, 179, 8, 0.35);
+}
+
+.report-health--poor {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.report-health--unknown {
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.report-health__rating {
+  display: block;
+  font-size: 20px;
+  font-weight: 800;
+}
+
+.report-health__soc {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.report-health__summary {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #d1d5db;
+}
+
+.report-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 16px;
+  margin: 0;
+}
+
+.report-grid dt {
+  margin: 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #9ca3af;
+}
+
+.report-grid dd {
+  margin: 2px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.report-hint {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(99, 102, 241, 0.12);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.report-dialog-actions {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
 }

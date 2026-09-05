@@ -24,7 +24,13 @@ pub struct AppConfig {
     pub show_battery_percent: bool,
     pub show_power_source: bool,
     pub show_charging_status: bool,
+    #[serde(default = "default_use_status_icons")]
+    pub use_status_icons: bool,
     pub match_os_theme: bool,
+}
+
+fn default_use_status_icons() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -45,6 +51,7 @@ impl Default for AppConfig {
             show_battery_percent: true,
             show_power_source: true,
             show_charging_status: true,
+            use_status_icons: true,
             match_os_theme: true,
         }
     }
@@ -110,11 +117,13 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
 }
 
 pub const WIDGET_BASE_WIDTH: f64 = 248.0;
-pub const WIDGET_BASE_HEIGHT: f64 = 198.0;
+pub const WIDGET_BASE_HEIGHT: f64 = 168.0;
+pub const WIDGET_CHARGE_BAR_EXTRA: f64 = 28.0;
 
-pub fn widget_size(scale: f64) -> (u32, u32) {
+pub fn widget_size(scale: f64, show_charge_bar: bool) -> (u32, u32) {
+    let height = WIDGET_BASE_HEIGHT + if show_charge_bar { WIDGET_CHARGE_BAR_EXTRA } else { 0.0 };
     (
         (WIDGET_BASE_WIDTH * scale).round() as u32,
-        (WIDGET_BASE_HEIGHT * scale).round() as u32,
+        (height * scale).round() as u32,
     )
 }

@@ -1,18 +1,30 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   getAppConfig,
+  getBatteryReport,
   getThresholdState,
   saveAppConfig,
   setWidgetScale,
 } from "../api";
-import type { AppConfig, ThresholdState } from "../types";
+import { useSystemTheme } from "../hooks/useSystemTheme";
+import { BatteryReportDialog } from "./BatteryReportDialog";
+import type { AppConfig, BatteryReport, ThresholdState } from "../types";
 
 export function SettingsView() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [thresholds, setThresholds] = useState<ThresholdState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [report, setReport] = useState<BatteryReport | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const scaleTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  useSystemTheme(config?.matchOsTheme ?? true);
+
+  useEffect(() => {
+    document.documentElement.dataset.window = "settings";
+  }, []);
 
   useEffect(() => {
     void Promise.all([getAppConfig(), getThresholdState()]).then(([cfg, state]) => {
@@ -42,12 +54,31 @@ export function SettingsView() {
     }
   };
 
-  const onScalePreview = async (scale: number) => {
-    update({ widgetScale: scale });
+  const onScalePreview = (scale: number) => {
+    const next = Math.min(1.75, Math.max(0.85, scale));
+    update({ widgetScale: next });
+    if (scaleTimerRef.current) clearTimeout(scaleTimerRef.current);
+    scaleTimerRef.current = setTimeout(() => {
+      void setWidgetScale(next, false).catch((e) => setError(String(e)));
+    }, 16);
+  };
+
+  const onScaleCommit = () => {
+    if (!config) return;
+    if (scaleTimerRef.current) clearTimeout(scaleTimerRef.current);
+    void setWidgetScale(config.widgetScale, true).catch((e) => setError(String(e)));
+  };
+
+  const onGenerateReport = async () => {
+    setError(null);
+    setReportLoading(true);
     try {
-      await setWidgetScale(scale);
+      const data = await getBatteryReport();
+      setReport(data);
     } catch (e) {
       setError(String(e));
+    } finally {
+      setReportLoading(false);
     }
   };
 
@@ -126,11 +157,35 @@ export function SettingsView() {
         <label className="settings-check">
           <input
             type="checkbox"
+            checked={config.useStatusIcons}
+            onChange={(e) => update({ useStatusIcons: e.target.checked })}
+          />
+          Use icons for power and charging (off = text labels)
+        </label>
+
+        <label className="settings-check">
+          <input
+            type="checkbox"
             checked={config.matchOsTheme}
             onChange={(e) => update({ matchOsTheme: e.target.checked })}
           />
           Match operating system theme and window effects
         </label>
+      </section>
+
+      <section className="settings-section">
+        <h2 className="settings-section-title">Battery Report</h2>
+        <p className="settings-hint">
+          View hardware details, health rating, and replacement part info from your system.
+        </p>
+        <button
+          type="button"
+          className="settings-secondary"
+          disabled={reportLoading}
+          onClick={() => void onGenerateReport()}
+        >
+          {reportLoading ? "Generating…" : "Generate Battery Report"}
+        </button>
       </section>
 
       <section className="settings-section">
@@ -144,7 +199,9 @@ export function SettingsView() {
             max={1.75}
             step={0.05}
             value={config.widgetScale}
-            onChange={(e) => void onScalePreview(Number(e.target.value))}
+            onChange={(e) => onScalePreview(Number(e.target.value))}
+            onMouseUp={onScaleCommit}
+            onTouchEnd={onScaleCommit}
           />
           <strong>{Math.round(config.widgetScale * 100)}%</strong>
         </label>
@@ -178,6 +235,8 @@ export function SettingsView() {
           Close
         </button>
       </div>
+
+      {report && <BatteryReportDialog report={report} onClose={() => setReport(null)} />}
     </div>
   );
 }

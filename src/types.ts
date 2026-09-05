@@ -31,7 +31,32 @@ export interface AppConfig {
   showBatteryPercent: boolean;
   showPowerSource: boolean;
   showChargingStatus: boolean;
+  useStatusIcons: boolean;
   matchOsTheme: boolean;
+}
+
+export interface BatteryReport {
+  generatedAtUnix: number;
+  platform: string;
+  vendor?: string | null;
+  model?: string | null;
+  serialNumber?: string | null;
+  technology: string;
+  state: string;
+  stateOfChargePercent: number;
+  stateOfHealthPercent?: number | null;
+  healthRating: string;
+  healthSummary: string;
+  energyFullWh?: number | null;
+  energyDesignWh?: number | null;
+  voltageV?: number | null;
+  temperatureC?: number | null;
+  cycleCount?: number | null;
+  isCharging: boolean;
+  isPlugged: boolean;
+  timeToEmptyMin?: number | null;
+  timeToFullMin?: number | null;
+  replacementHint?: string | null;
 }
 
 export type SystemTheme = "light" | "dark";

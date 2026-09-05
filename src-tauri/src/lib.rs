@@ -5,10 +5,10 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
-use battery::{BatteryStatus, ThresholdState, create_backend};
+use battery::{BatteryReport, BatteryStatus, ThresholdState, create_backend, generate_battery_report};
 use config::{AppConfig, load_config, save_config, widget_size};
 use tauri::{
-    Emitter, LogicalSize, Manager, State, WebviewWindow,
+    Emitter, LogicalSize, Manager, State, WebviewWindow, WindowEvent,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -131,20 +131,51 @@ fn merge_runtime_config(state: &AppState) -> Result<AppConfig, String> {
     Ok(cfg)
 }
 
-fn resize_widget_window(window: &WebviewWindow, scale: f64) -> Result<(), String> {
-    let (width, height) = widget_size(scale);
+fn show_charge_bar(cfg: &AppConfig) -> bool {
+    cfg.charge_to_full_active || cfg.charge_to_full_verifying || cfg.charge_to_full_complete
+}
+
+fn resize_widget_window(
+    window: &WebviewWindow,
+    scale: f64,
+    show_charge_bar: bool,
+) -> Result<(), String> {
+    let (width, height) = widget_size(scale, show_charge_bar);
     window
         .set_size(LogicalSize::new(width as f64, height as f64))
         .map_err(|e| e.to_string())
 }
 
 fn apply_widget_window(state: &AppState, app: &tauri::AppHandle) -> Result<(), String> {
-    let cfg = state.config.lock().map_err(|e| e.to_string())?;
+    let cfg = merge_runtime_config(state)?;
     if let Some(window) = app.get_webview_window("widget") {
-        resize_widget_window(&window, cfg.widget_scale)?;
+        resize_widget_window(&window, cfg.widget_scale, show_charge_bar(&cfg))?;
     }
     Ok(())
 }
+
+#[cfg(windows)]
+fn configure_widget_window(window: &WebviewWindow) {
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    };
+
+    let _ = window.set_shadow(false);
+    if let Ok(hwnd) = window.hwnd() {
+        let preference = DWMWCP_DONOTROUND.0 as u32;
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &preference as *const _ as *const _,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn configure_widget_window(_window: &WebviewWindow) {}
 
 fn activate_charge_to_full(
     app: &tauri::AppHandle,
@@ -154,6 +185,7 @@ fn activate_charge_to_full(
     if is_battery_full(status) {
         finish_charge_to_full_session(state)?;
         let _ = app.emit("charge-to-full-complete", ());
+        let _ = apply_widget_window(state, app);
         return Ok(());
     }
 
@@ -163,6 +195,7 @@ fn activate_charge_to_full(
     monitor.verifying = false;
     monitor.was_charging = false;
     let _ = app.emit("charge-to-full-started", ());
+    let _ = apply_widget_window(state, app);
     Ok(())
 }
 
@@ -205,6 +238,7 @@ fn tick_charge_monitor(app: &tauri::AppHandle, state: &AppState) {
     if should_cancel {
         if cancel_charge_to_full_session(state).is_ok() {
             let _ = app.emit("charge-to-full-ended", ());
+            let _ = apply_widget_window(state, app);
         }
         return;
     }
@@ -290,6 +324,7 @@ fn tick_charge_monitor(app: &tauri::AppHandle, state: &AppState) {
     if should_finish {
         if finish_charge_to_full_session(state).is_ok() {
             let _ = app.emit("charge-to-full-complete", ());
+            let _ = apply_widget_window(state, app);
         }
         return;
     }
@@ -297,6 +332,7 @@ fn tick_charge_monitor(app: &tauri::AppHandle, state: &AppState) {
     if should_clear {
         clear_complete_state(state);
         let _ = app.emit("charge-to-full-ended", ());
+        let _ = apply_widget_window(state, app);
     }
 }
 
@@ -362,6 +398,11 @@ fn get_threshold_state(state: State<'_, AppState>) -> Result<ThresholdState, Str
 }
 
 #[tauri::command]
+fn get_battery_report() -> Result<BatteryReport, String> {
+    generate_battery_report()
+}
+
+#[tauri::command]
 fn get_app_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
     merge_runtime_config(&state)
 }
@@ -423,10 +464,13 @@ fn restore_thresholds(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn show_settings(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("settings") {
-        window.show().map_err(|e| e.to_string())?;
-        window.set_focus().map_err(|e| e.to_string())?;
-    }
+    let window = app
+        .get_webview_window("settings")
+        .ok_or_else(|| "Settings window not found".to_string())?;
+
+    let _ = window.unminimize();
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -469,14 +513,18 @@ fn set_widget_scale(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     scale: f64,
+    persist: Option<bool>,
 ) -> Result<(), String> {
     if scale < 0.85 || scale > 1.75 {
         return Err("Widget scale must be between 0.85 and 1.75".into());
     }
+    let save = persist.unwrap_or(true);
     {
         let mut cfg = state.config.lock().map_err(|e| e.to_string())?;
         cfg.widget_scale = scale;
-        save_config(&cfg)?;
+        if save {
+            save_config(&cfg)?;
+        }
     }
     apply_widget_window(&state, &app)
 }
@@ -576,6 +624,7 @@ pub fn run() {
             }
 
             if let Some(window) = app.get_webview_window("widget") {
+                configure_widget_window(&window);
                 let _ = window.set_position(tauri::PhysicalPosition::new(
                     initial_config.widget_x,
                     initial_config.widget_y,
@@ -585,7 +634,16 @@ pub fn run() {
                 }
             }
 
-            let _ = app.get_webview_window("settings").and_then(|w| w.hide().ok());
+            if let Some(window) = app.get_webview_window("settings") {
+                let settings_for_close = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = settings_for_close.hide();
+                    }
+                });
+                let _ = window.hide();
+            }
 
             build_tray(&app.handle())?;
             start_charge_monitor(app.handle().clone());
@@ -594,6 +652,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_battery_status,
+            get_battery_report,
             get_threshold_state,
             get_app_config,
             save_app_config,

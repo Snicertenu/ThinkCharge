@@ -113,6 +113,9 @@ pub fn read_battery_status() -> BatteryStatus {
     }
 }
 
+pub use report::{BatteryReport, generate_battery_report};
+
+mod report;
 #[cfg(windows)]
 mod windows_pwrmgr;
 #[cfg(windows)]
