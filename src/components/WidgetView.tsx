@@ -86,7 +86,10 @@ export function WidgetView() {
   const rafRef = useRef<number | null>(null);
   const pendingScaleRef = useRef<number | null>(null);
   const lastWindowSyncRef = useRef(0);
+  const configRef = useRef(config);
   const window = getCurrentWindow();
+
+  configRef.current = config;
 
   useSystemTheme(config?.matchOsTheme ?? true, false);
 
@@ -96,32 +99,46 @@ export function WidgetView() {
     setConfig(cfg);
   }, []);
 
+  const refreshInFlight = useRef(false);
+  const safeRefresh = useCallback(async () => {
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    try {
+      await refresh();
+    } catch {
+      // Keep the last good UI state if a poll fails (e.g. transient IPC stall).
+    } finally {
+      refreshInFlight.current = false;
+    }
+  }, [refresh]);
+
   useEffect(() => {
-    void refresh();
+    void safeRefresh();
     const intervalMs = chargeSessionActive(config) ? 2000 : 4000;
-    const timer = setInterval(() => void refresh(), intervalMs);
+    const timer = setInterval(() => void safeRefresh(), intervalMs);
     return () => clearInterval(timer);
-  }, [refresh, config?.chargeToFullActive, config?.chargeToFullArmed, config?.chargeToFullComplete, config?.chargeToFullVerifying]);
+  }, [safeRefresh, config?.chargeToFullActive, config?.chargeToFullArmed, config?.chargeToFullComplete, config?.chargeToFullVerifying]);
 
   useEffect(() => {
     const unlisteners: Array<() => void> = [];
-    void listen("charge-to-full-ended", () => void refresh()).then((fn) =>
+    void listen("charge-to-full-ended", () => void safeRefresh()).then((fn) =>
       unlisteners.push(fn),
     );
-    void listen("charge-to-full-started", () => void refresh()).then((fn) =>
+    void listen("charge-to-full-started", () => void safeRefresh()).then((fn) =>
       unlisteners.push(fn),
     );
-    void listen("charge-to-full-complete", () => void refresh()).then((fn) =>
+    void listen("charge-to-full-complete", () => void safeRefresh()).then((fn) =>
       unlisteners.push(fn),
     );
     return () => {
       for (const fn of unlisteners) fn();
     };
-  }, [refresh]);
+  }, [safeRefresh]);
 
   // Sync scale when the user resizes via window edges (not the drag handle).
   useEffect(() => {
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    let unlisten: (() => void) | undefined;
 
     const onResize = () => {
       if (draggingRef.current) return;
@@ -130,7 +147,11 @@ export function WidgetView() {
         void window.innerSize().then(async (size) => {
           if (draggingRef.current) return;
           const next = clampScale(
-            scaleFromWindowSize(size.width, size.height, showChargeBar(config)),
+            scaleFromWindowSize(
+              size.width,
+              size.height,
+              showChargeBar(configRef.current),
+            ),
           );
           setPreviewScale(null);
           setConfig((prev) => (prev ? { ...prev, widgetScale: next } : prev));
@@ -139,9 +160,12 @@ export function WidgetView() {
       }, 200);
     };
 
-    void window.onResized(onResize);
+    void window.onResized(onResize).then((fn) => {
+      unlisten = fn;
+    });
     return () => {
       if (resizeTimer) clearTimeout(resizeTimer);
+      unlisten?.();
     };
   }, [window]);
 

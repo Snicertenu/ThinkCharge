@@ -131,7 +131,35 @@ impl WindowsThinkPadBackend {
     }
 
     fn driver_available(&self) -> bool {
-        try_open_device().is_ok()
+        // Always close the probe handle — leaking CreateFile handles will exhaust
+        // the process after long uptime (policy / settings polls).
+        match try_open_device() {
+            Ok(handle) => {
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Re-assert IOCTL thresholds without registry writes or WM_SETTINGCHANGE.
+    /// Used by the background maintainer so we do not broadcast every few seconds.
+    fn reassert_thresholds_ioctl(&self, start: u8, stop: u8) -> Result<(), String> {
+        with_device(|handle| apply_thresholds_ioctl(handle, start, stop))
+    }
+
+    /// Quiet charge-to-full / top-off reassert (IOCTL only).
+    fn reassert_charge_to_full_ioctl(&self, top_off: bool) -> Result<(), String> {
+        if top_off {
+            with_device(release_charge_limit_ioctl)
+        } else {
+            with_device(|handle| {
+                release_charge_limit_ioctl(handle)?;
+                apply_charge_to_full_ioctl(handle)
+            })
+        }
     }
 }
 
@@ -197,5 +225,27 @@ impl BatteryBackend for WindowsThinkPadBackend {
 
     fn restore_thresholds(&mut self, start: u8, stop: u8) -> Result<(), String> {
         self.set_thresholds(start, stop)
+    }
+
+    fn maintain_policy(
+        &mut self,
+        charge_to_full: bool,
+        enabled: bool,
+        start: u8,
+        stop: u8,
+    ) -> Result<(), String> {
+        if charge_to_full {
+            // Periodic reassert: IOCTL only — no registry churn or HWND_BROADCAST.
+            self.reassert_charge_to_full_ioctl(true)
+        } else if enabled {
+            self.reassert_thresholds_ioctl(start, stop)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn reassert_charge_to_full(&mut self, top_off: bool) -> Result<(), String> {
+        self.full_charge_mode = true;
+        self.reassert_charge_to_full_ioctl(top_off)
     }
 }

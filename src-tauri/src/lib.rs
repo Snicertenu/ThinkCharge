@@ -52,12 +52,37 @@ fn should_cancel_on_unplug(monitor: &ChargeMonitor) -> bool {
 }
 
 fn apply_saved_thresholds(state: &AppState) -> Result<(), String> {
-    let cfg = state.config.lock().map_err(|e| e.to_string())?;
-    if !cfg.thresholds_enabled {
+    let (enabled, start, stop) = {
+        let cfg = state.config.lock().map_err(|e| e.to_string())?;
+        (
+            cfg.thresholds_enabled,
+            cfg.start_threshold,
+            cfg.stop_threshold,
+        )
+    };
+    if !enabled {
         return Ok(());
     }
     let mut backend = state.backend.lock().map_err(|e| e.to_string())?;
-    backend.restore_thresholds(cfg.start_threshold, cfg.stop_threshold)
+    backend.restore_thresholds(start, stop)
+}
+
+fn apply_thresholds_only(state: &AppState) -> Result<(), String> {
+    let (enabled, start, stop) = {
+        let cfg = state.config.lock().map_err(|e| e.to_string())?;
+        (
+            cfg.thresholds_enabled,
+            cfg.start_threshold,
+            cfg.stop_threshold,
+        )
+    };
+
+    if enabled {
+        let mut backend = state.backend.lock().map_err(|e| e.to_string())?;
+        backend.set_thresholds(start, stop)?;
+    }
+
+    Ok(())
 }
 
 fn restore_thresholds_internal(state: &AppState) -> Result<(), String> {
@@ -108,17 +133,6 @@ fn clear_charge_to_full_state(state: &AppState) {
 
 fn clear_complete_state(state: &AppState) {
     clear_charge_to_full_state(state);
-}
-
-fn apply_thresholds_only(state: &AppState) -> Result<(), String> {
-    let cfg = state.config.lock().map_err(|e| e.to_string())?;
-    let mut backend = state.backend.lock().map_err(|e| e.to_string())?;
-
-    if cfg.thresholds_enabled {
-        backend.set_thresholds(cfg.start_threshold, cfg.stop_threshold)?;
-    }
-
-    Ok(())
 }
 
 fn merge_runtime_config(state: &AppState) -> Result<AppConfig, String> {
@@ -190,10 +204,14 @@ fn activate_charge_to_full(
     }
 
     reapply_charge_to_full(state, status);
-    let mut monitor = state.charge_monitor.lock().map_err(|e| e.to_string())?;
-    monitor.active = true;
-    monitor.verifying = false;
-    monitor.was_charging = false;
+    {
+        let mut monitor = state.charge_monitor.lock().map_err(|e| e.to_string())?;
+        monitor.active = true;
+        monitor.verifying = false;
+        monitor.was_charging = false;
+    }
+    // Drop monitor before apply_widget_window — std::Mutex is not reentrant and
+    // merge_runtime_config also locks charge_monitor (would deadlock the UI).
     let _ = app.emit("charge-to-full-started", ());
     let _ = apply_widget_window(state, app);
     Ok(())
@@ -209,12 +227,11 @@ fn begin_charge_to_full_session(
 
 fn reapply_charge_to_full(state: &AppState, status: &BatteryStatus) {
     if let Ok(mut backend) = state.backend.lock() {
-        // Kick the controller if charging stalled below full.
+        // Quiet IOCTL reassert only — never HWND_BROADCAST from background ticks.
         if status.is_plugged && !status.is_charging && status.percent_exact < 99.95 {
-            let _ = backend.charge_to_full();
+            let _ = backend.reassert_charge_to_full(false);
         }
-        // Always finish with unrestricted automatic mode — no 99% driver ceiling.
-        let _ = backend.charge_to_full_top_off();
+        let _ = backend.reassert_charge_to_full(true);
     }
 }
 
@@ -338,40 +355,45 @@ fn tick_charge_monitor(app: &tauri::AppHandle, state: &AppState) {
 
 fn start_policy_maintainer(app: tauri::AppHandle) {
     thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(5));
-        if let Some(state) = app.try_state::<AppState>() {
-            let (charge_active, armed, enabled, start, stop) = {
-                let monitor = match state.charge_monitor.lock() {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                let cfg = match state.config.lock() {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-                (
-                    monitor.active,
-                    monitor.armed,
-                    cfg.thresholds_enabled,
-                    cfg.start_threshold,
-                    cfg.stop_threshold,
-                )
-            };
-
-            if charge_active || armed {
-                let status = {
-                    let backend = match state.backend.lock() {
-                        Ok(b) => b,
-                        Err(_) => continue,
+        thread::sleep(Duration::from_secs(30));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some(state) = app.try_state::<AppState>() {
+                let (charge_active, armed, enabled, start, stop) = {
+                    let monitor = match state.charge_monitor.lock() {
+                        Ok(m) => m,
+                        Err(_) => return,
                     };
-                    backend.get_status()
+                    let cfg = match state.config.lock() {
+                        Ok(c) => c,
+                        Err(_) => return,
+                    };
+                    (
+                        monitor.active,
+                        monitor.armed,
+                        cfg.thresholds_enabled,
+                        cfg.start_threshold,
+                        cfg.stop_threshold,
+                    )
                 };
-                reapply_charge_to_full(&state, &status);
-            } else if let Ok(mut backend) = state.backend.lock() {
-                if enabled {
-                    let _ = backend.maintain_policy(false, true, start, stop);
+
+                if charge_active || armed {
+                    let status = {
+                        let backend = match state.backend.lock() {
+                            Ok(b) => b,
+                            Err(_) => return,
+                        };
+                        backend.get_status()
+                    };
+                    reapply_charge_to_full(&state, &status);
+                } else if enabled {
+                    if let Ok(mut backend) = state.backend.lock() {
+                        let _ = backend.maintain_policy(false, true, start, stop);
+                    }
                 }
             }
+        }));
+        if result.is_err() {
+            eprintln!("ThinkCharge: policy maintainer panic recovered; continuing");
         }
     });
 }
@@ -379,8 +401,13 @@ fn start_policy_maintainer(app: tauri::AppHandle) {
 fn start_charge_monitor(app: tauri::AppHandle) {
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(3));
-        if let Some(state) = app.try_state::<AppState>() {
-            tick_charge_monitor(&app, &state);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some(state) = app.try_state::<AppState>() {
+                tick_charge_monitor(&app, &state);
+            }
+        }));
+        if result.is_err() {
+            eprintln!("ThinkCharge: charge monitor panic recovered; continuing");
         }
     });
 }
@@ -448,7 +475,14 @@ fn charge_to_full(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(
         }
     }
 
-    reapply_charge_to_full(&state, &status);
+    // User-initiated: full registry + IOCTL + broadcast once.
+    {
+        let mut backend = state.backend.lock().map_err(|e| e.to_string())?;
+        if status.is_plugged && !status.is_charging && status.percent_exact < 99.95 {
+            let _ = backend.charge_to_full();
+        }
+        let _ = backend.charge_to_full_top_off();
+    }
 
     if status.is_plugged {
         activate_charge_to_full(&app, &state, &status)?;
@@ -559,7 +593,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .cloned()
         .expect("missing app icon");
 
-    let _tray = TrayIconBuilder::new()
+    let tray = TrayIconBuilder::new()
         .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -600,6 +634,9 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+
+    // Keep the tray alive for the process lifetime (dropping removes the icon).
+    app.manage(tray);
 
     Ok(())
 }

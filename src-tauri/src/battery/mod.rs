@@ -1,5 +1,29 @@
 use serde::Serialize;
 use starship_battery::units::ratio::percent as percent_unit;
+use std::sync::Mutex;
+
+static BATTERY_MANAGER: Mutex<Option<starship_battery::Manager>> = Mutex::new(None);
+
+fn with_battery_manager<T>(mut f: impl FnMut(&starship_battery::Manager) -> Option<T>) -> Option<T> {
+    let mut guard = match BATTERY_MANAGER.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard.is_none() {
+        *guard = starship_battery::Manager::new().ok();
+    }
+    let Some(manager) = guard.as_ref() else {
+        return None;
+    };
+    match f(manager) {
+        Some(value) => Some(value),
+        None => {
+            // Recreate on soft failure (e.g. transient WMI/COM glitch after long uptime).
+            *guard = starship_battery::Manager::new().ok();
+            guard.as_ref().and_then(|m| f(m))
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +59,7 @@ pub trait BatteryBackend: Send {
     fn restore_thresholds(&mut self, start: u8, stop: u8) -> Result<(), String>;
 
     /// Re-apply the active policy to override external tools (e.g. Lenovo Vantage).
+    /// Implementations should keep this cheap (no broadcasts / full registry rewrites).
     fn maintain_policy(
         &mut self,
         charge_to_full: bool,
@@ -43,38 +68,42 @@ pub trait BatteryBackend: Send {
         stop: u8,
     ) -> Result<(), String> {
         if charge_to_full {
-            self.charge_to_full()
+            self.reassert_charge_to_full(true)
         } else if enabled {
             self.set_thresholds(start, stop)
         } else {
             Ok(())
         }
     }
+
+    /// Quietly reassert charge-to-full IOCTL state (for background monitors).
+    fn reassert_charge_to_full(&mut self, top_off: bool) -> Result<(), String> {
+        if top_off {
+            self.charge_to_full_top_off()
+        } else {
+            self.charge_to_full()
+        }
+    }
 }
 
 pub fn read_battery_status() -> BatteryStatus {
-    let Ok(manager) = starship_battery::Manager::new() else {
-        return BatteryStatus {
-            percent: 0,
-            percent_exact: 0.0,
-            is_charging: false,
-            is_plugged: false,
-            is_full: false,
-            time_remaining_sec: None,
-        };
-    };
-    let Ok(mut batteries) = manager.batteries() else {
-        return BatteryStatus {
-            percent: 0,
-            percent_exact: 0.0,
-            is_charging: false,
-            is_plugged: false,
-            is_full: false,
-            time_remaining_sec: None,
-        };
+    let empty = BatteryStatus {
+        percent: 0,
+        percent_exact: 0.0,
+        is_charging: false,
+        is_plugged: false,
+        is_full: false,
+        time_remaining_sec: None,
     };
 
-    if let Some(Ok(battery)) = batteries.next() {
+    with_battery_manager(|manager| {
+        let Ok(mut batteries) = manager.batteries() else {
+            return None;
+        };
+        let Some(Ok(battery)) = batteries.next() else {
+            return Some(empty.clone());
+        };
+
         let percent_exact = battery
             .state_of_charge()
             .get::<percent_unit>()
@@ -93,24 +122,16 @@ pub fn read_battery_status() -> BatteryStatus {
             .map(|t| t.value.max(0.0) as u64)
             .filter(|_| matches!(state, starship_battery::State::Discharging));
 
-        return BatteryStatus {
+        Some(BatteryStatus {
             percent: level,
             percent_exact,
             is_charging,
             is_plugged,
             is_full,
             time_remaining_sec,
-        };
-    }
-
-    BatteryStatus {
-        percent: 0,
-        percent_exact: 0.0,
-        is_charging: false,
-        is_plugged: false,
-        is_full: false,
-        time_remaining_sec: None,
-    }
+        })
+    })
+    .unwrap_or(empty)
 }
 
 pub use report::{BatteryReport, generate_battery_report};
