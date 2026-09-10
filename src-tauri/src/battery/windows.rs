@@ -16,9 +16,13 @@ use windows::Win32::System::IO::DeviceIoControl;
 const IOCTL_SELECT_MODE: u32 = 0x22261C;
 const IOCTL_SET_START: u32 = 0x222630;
 const IOCTL_SET_STOP: u32 = 0x222638;
-const THRESHOLD_MODE_BATTERY1: u32 = 0x00000101;
 const AUTOMATIC_MODE: u32 = 0x00000000;
-const BATTERY1_PREFIX: u32 = 0x00000100;
+
+/// Apply thresholds to primary and secondary packs when present (T-series dual-battery, etc.).
+const BATTERY_SLOTS: &[(u32, u32)] = &[
+    (0x0000_0101, 0x0000_0100), // Battery 1 mode + value prefix
+    (0x0000_0201, 0x0000_0200), // Battery 2 mode + value prefix
+];
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -88,30 +92,55 @@ fn with_device<F: FnOnce(HANDLE) -> Result<(), String>>(f: F) -> Result<(), Stri
     result
 }
 
+fn for_each_battery_slot(
+    handle: HANDLE,
+    mut apply: impl FnMut(HANDLE, u32, u32) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut applied = 0u32;
+    let mut last_err = String::from("No Lenovo battery slot accepted the IOCTL");
+    for &(mode, prefix) in BATTERY_SLOTS {
+        match apply(handle, mode, prefix) {
+            Ok(()) => applied += 1,
+            Err(e) => last_err = e,
+        }
+    }
+    if applied > 0 {
+        Ok(())
+    } else {
+        Err(last_err)
+    }
+}
+
 fn apply_thresholds_ioctl(handle: HANDLE, start: u8, stop: u8) -> Result<(), String> {
     let stop = stop.min(99);
-    device_ioctl(handle, IOCTL_SELECT_MODE, THRESHOLD_MODE_BATTERY1)?;
-    // Lenovo driver expects stop before start.
-    device_ioctl(handle, IOCTL_SET_STOP, BATTERY1_PREFIX | stop as u32)?;
-    device_ioctl(handle, IOCTL_SET_START, BATTERY1_PREFIX | start as u32)?;
-    Ok(())
+    for_each_battery_slot(handle, |handle, mode, prefix| {
+        device_ioctl(handle, IOCTL_SELECT_MODE, mode)?;
+        // Lenovo driver expects stop before start.
+        device_ioctl(handle, IOCTL_SET_STOP, prefix | stop as u32)?;
+        device_ioctl(handle, IOCTL_SET_START, prefix | start as u32)?;
+        Ok(())
+    })
 }
 
 fn apply_charge_to_full_ioctl(handle: HANDLE) -> Result<(), String> {
-    device_ioctl(handle, IOCTL_SELECT_MODE, THRESHOLD_MODE_BATTERY1)?;
-    // No stop ceiling.
-    device_ioctl(handle, IOCTL_SET_STOP, BATTERY1_PREFIX)?;
-    // Resume charging whenever below 99% (driver maximum).
-    device_ioctl(handle, IOCTL_SET_START, BATTERY1_PREFIX | 99)?;
-    Ok(())
+    for_each_battery_slot(handle, |handle, mode, prefix| {
+        device_ioctl(handle, IOCTL_SELECT_MODE, mode)?;
+        // No stop ceiling.
+        device_ioctl(handle, IOCTL_SET_STOP, prefix)?;
+        // Resume charging whenever below 99% (driver maximum).
+        device_ioctl(handle, IOCTL_SET_START, prefix | 99)?;
+        Ok(())
+    })
 }
 
 fn release_charge_limit_ioctl(handle: HANDLE) -> Result<(), String> {
-    device_ioctl(handle, IOCTL_SELECT_MODE, THRESHOLD_MODE_BATTERY1)?;
-    device_ioctl(handle, IOCTL_SET_STOP, BATTERY1_PREFIX)?;
-    device_ioctl(handle, IOCTL_SET_START, BATTERY1_PREFIX)?;
-    device_ioctl(handle, IOCTL_SELECT_MODE, AUTOMATIC_MODE)?;
-    Ok(())
+    for_each_battery_slot(handle, |handle, mode, prefix| {
+        device_ioctl(handle, IOCTL_SELECT_MODE, mode)?;
+        device_ioctl(handle, IOCTL_SET_STOP, prefix)?;
+        device_ioctl(handle, IOCTL_SET_START, prefix)?;
+        Ok(())
+    })?;
+    device_ioctl(handle, IOCTL_SELECT_MODE, AUTOMATIC_MODE)
 }
 
 pub struct WindowsThinkPadBackend {

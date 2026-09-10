@@ -2,48 +2,100 @@
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::sync::OnceLock;
 
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE};
 use winreg::RegKey;
 
-const DATA_PATH: &str = r"SOFTWARE\WOW6432Node\Lenovo\PWRMGRV\ConfKeys\Data";
+/// Common Lenovo Power Manager registry roots across 32/64-bit and OEM layouts.
+const DATA_PATH_CANDIDATES: &[&str] = &[
+    r"SOFTWARE\WOW6432Node\Lenovo\PWRMGRV\ConfKeys\Data",
+    r"SOFTWARE\Lenovo\PWRMGRV\ConfKeys\Data",
+];
+
 const SERVICE_NAME: &str = "IBMPMDRV";
 
-pub fn find_battery_subkey() -> Result<String, String> {
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let data = hklm
-        .open_subkey(DATA_PATH)
-        .map_err(|e| format!("PWRMGRV registry not found: {e}"))?;
+#[derive(Clone)]
+struct PwrmgrLocation {
+    data_path: String,
+    battery_key: String,
+}
 
-    for name in data
-        .enum_keys()
-        .map(|r| r.map_err(|e| e.to_string()))
-        .collect::<Result<Vec<_>, _>>()?
-    {
-        let sub = data
-            .open_subkey(&name)
-            .map_err(|e| format!("Failed to open battery key {name}: {e}"))?;
-        if sub.get_value::<u32, _>("ChargeStartPercentage").is_ok() {
-            return Ok(name);
+static PWRMGR_LOCATION: OnceLock<Result<PwrmgrLocation, String>> = OnceLock::new();
+
+fn discover_pwrmgr_location() -> Result<PwrmgrLocation, String> {
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let mut last_err = String::from("PWRMGRV registry not found");
+
+    for data_path in DATA_PATH_CANDIDATES {
+        let data = match hklm.open_subkey(data_path) {
+            Ok(key) => key,
+            Err(e) => {
+                last_err = format!("{data_path}: {e}");
+                continue;
+            }
+        };
+
+        let names = match data
+            .enum_keys()
+            .map(|r| r.map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(names) => names,
+            Err(e) => {
+                last_err = format!("{data_path}: {e}");
+                continue;
+            }
+        };
+
+        for name in names {
+            let sub = match data.open_subkey(&name) {
+                Ok(key) => key,
+                Err(_) => continue,
+            };
+            if sub.get_value::<u32, _>("ChargeStartPercentage").is_ok()
+                || sub.get_value::<u32, _>("ChargeStopPercentage").is_ok()
+            {
+                return Ok(PwrmgrLocation {
+                    data_path: (*data_path).to_string(),
+                    battery_key: name,
+                });
+            }
         }
+
+        last_err = format!("No battery key under {data_path}");
     }
 
-    Err("No Lenovo battery configuration key found in PWRMGRV registry.".into())
+    Err(format!(
+        "No Lenovo battery configuration key found in PWRMGRV registry ({last_err}). \
+         Install Lenovo Power Manager / Vantage battery drivers."
+    ))
+}
+
+fn pwrmgr_location() -> Result<&'static PwrmgrLocation, String> {
+    let cached = PWRMGR_LOCATION.get_or_init(discover_pwrmgr_location);
+    cached.as_ref().map_err(|e| e.clone())
 }
 
 fn battery_key() -> Result<RegKey, String> {
+    let loc = pwrmgr_location()?;
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let name = find_battery_subkey()?;
-    hklm.open_subkey_with_flags(format!("{DATA_PATH}\\{name}"), KEY_WRITE)
-        .map_err(|e| format!("Cannot write battery registry (admin required?): {e}"))
+    hklm.open_subkey_with_flags(
+        format!("{}\\{}", loc.data_path, loc.battery_key),
+        KEY_WRITE,
+    )
+    .map_err(|e| format!("Cannot write battery registry (admin required?): {e}"))
+}
+
+fn battery_key_read() -> Result<RegKey, String> {
+    let loc = pwrmgr_location()?;
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    hklm.open_subkey_with_flags(format!("{}\\{}", loc.data_path, loc.battery_key), KEY_READ)
+        .map_err(|e| e.to_string())
 }
 
 pub fn read_registry_thresholds() -> Result<(Option<u8>, Option<u8>, bool), String> {
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let name = find_battery_subkey()?;
-    let key = hklm
-        .open_subkey_with_flags(format!("{DATA_PATH}\\{name}"), KEY_READ)
-        .map_err(|e| e.to_string())?;
+    let key = battery_key_read()?;
 
     let start: u32 = key.get_value("ChargeStartPercentage").unwrap_or(0);
     let stop: u32 = key.get_value("ChargeStopPercentage").unwrap_or(100);
